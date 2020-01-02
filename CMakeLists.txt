@@ -64,7 +64,7 @@ if (NOT CMAKE_VERSION VERSION_LESS 2.8.12)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
-  #	add_definitions(-wd68 -wd186 -wd279 -wd327 -wd161 -wd3180)
+  add_definitions(-wd68 -wd186 -wd279 -wd327 -wd161 -wd3180)
 endif()
 
 # Endianess
