@@ -36,20 +36,21 @@ MKDIR ?= mkdir -p
 LN ?= ln -sf
 LDCONF ?= /sbin/ldconfig -n
 
-# Solaris provides a non-Posix grep at /usr/bin
+# Solaris provides a non-Posix sed and grep at /usr/bin
+# Solaris 10 is missing AR in /usr/bin
 ifneq ($(wildcard /usr/xpg4/bin/grep),)
   GREP := /usr/xpg4/bin/grep
 endif
 ifneq ($(wildcard /usr/xpg4/bin/sed),)
   SED := /usr/xpg4/bin/sed
 endif
-
-# Yet another Clang hack. I think the LLVM devs are making the shit up
-# as they go. Also see https://github.com/weidai11/cryptopp/issues/831.
-MACHINEX := $(shell $(CXX) $(CXXFLAGS) -dumpmachine 2>/dev/null)
-ifeq ($(MACHINEX),armv8l-unknown-linux-gnueabihf)
-  MACHINEX := armv7l-unknown-linux-gnueabihf
+ifneq ($(wildcard /usr/xpg4/bin/ar),)
+  AR := /usr/xpg4/bin/ar
 endif
+
+# Clang is reporting armv8l-unknown-linux-gnueabihf
+# for ARMv7 images on Aarch64 hardware.
+MACHINEX := $(shell $(CXX) $(CXXFLAGS) -dumpmachine 2>/dev/null)
 HOSTX := $(shell echo $(MACHINEX) | cut -f 1 -d '-')
 ifeq ($(HOSTX),)
   HOSTX := $(shell uname -m 2>/dev/null)
@@ -61,7 +62,7 @@ IS_PPC32 := $(shell echo "$(HOSTX)" | $(GREP) -v "64" | $(GREP) -i -c -E 'ppc|po
 IS_PPC64 := $(shell echo "$(HOSTX)" | $(GREP) -i -c -E 'ppc64|powerpc64|power64')
 IS_SPARC32 := $(shell echo "$(HOSTX)" | $(GREP) -v "64" | $(GREP) -i -c -E 'sun|sparc')
 IS_SPARC64 := $(shell echo "$(HOSTX)" | $(GREP) -i -c -E 'sun|sparc64')
-IS_ARM32 := $(shell echo "$(HOSTX)" | $(GREP) -i -c -E 'arm|armhf|arm7l|eabihf')
+IS_ARM32 := $(shell echo "$(HOSTX)" | $(GREP) -i -c -E 'arm|armhf|arm7l|eabihf|arm8l')
 IS_ARMV8 := $(shell echo "$(HOSTX)" | $(GREP) -i -c -E 'aarch32|aarch64|arm64|armv8')
 
 # Attempt to determine platform
@@ -128,7 +129,7 @@ endif
 # Strip out -Wall, -Wextra and friends for feature testing. FORTIFY_SOURCE is removed
 # because it requires -O1 or higher, but we use -O0 to tame the optimizer.
 ifeq ($(DETECT_FEATURES),1)
-  TCXXFLAGS := $(filter-out -D_FORTIFY_SOURCE=% -Wall -Wextra -Werror% -Wunused -Wconversion -Wp%, $(CXXFLAGS))
+  TCXXFLAGS := $(filter-out -D_FORTIFY_SOURCE=% -M -MM -Wall -Wextra -Werror% -Wunused -Wconversion -Wp%, $(CXXFLAGS))
   ifneq ($(strip $(TCXXFLAGS)),)
     $(info Using testing flags: $(TCXXFLAGS))
   endif
@@ -165,10 +166,10 @@ endif
 # Base CXXFLAGS used if the user did not specify them
 ifeq ($(CXXFLAGS),)
   ifeq ($(SUN_COMPILER),1)
-    CRYPTOPP_CXXFLAGS = -DNDEBUG -g -xO3
+    CRYPTOPP_CXXFLAGS += -DNDEBUG -g -xO3
     ZOPT = -xO0
   else
-    CRYPTOPP_CXXFLAGS = -DNDEBUG -g2 -O3
+    CRYPTOPP_CXXFLAGS += -DNDEBUG -g2 -O3
     ZOPT = -O0
   endif
 endif
@@ -185,23 +186,33 @@ else ifeq ($(CLANG_COMPILER),1)
   CC=clang
 endif
 
-# Default prefix for make install
+# http://www.gnu.org/prep/standards/html_node/Directory-Variables.html
 ifeq ($(PREFIX),)
 PREFIX = /usr/local
-endif
-
-# http://www.gnu.org/prep/standards/html_node/Directory-Variables.html
-ifeq ($(DATADIR),)
-DATADIR := $(PREFIX)/share
+PC_PREFIX = /usr/local
+else
+PC_PREFIX = $(PREFIX)
 endif
 ifeq ($(LIBDIR),)
 LIBDIR := $(PREFIX)/lib
+PC_LIBDIR = $${prefix}/lib
+else
+PC_LIBDIR = $(LIBDIR)
 endif
-ifeq ($(BINDIR),)
-BINDIR := $(PREFIX)/bin
+ifeq ($(DATADIR),)
+DATADIR := $(PREFIX)/share
+PC_DATADIR = $${prefix}/share
+else
+PC_DATADIR = $(DATADIR)
 endif
 ifeq ($(INCLUDEDIR),)
 INCLUDEDIR := $(PREFIX)/include
+PC_INCLUDEDIR = $${prefix}/include
+else
+PC_INCLUDEDIR = $(INCLUDEDIR)
+endif
+ifeq ($(BINDIR),)
+BINDIR := $(PREFIX)/bin
 endif
 
 # We honor ARFLAGS, but the "v" option used by default causes a noisy make
@@ -236,7 +247,7 @@ endif
 #####               X86/X32/X64 Options               #####
 ###########################################################
 
-ifneq ($(IS_X86)$(IS_X64),00)
+ifneq ($(IS_X86)$(IS_X64)$(IS_MINGW),000)
 ifeq ($(DETECT_FEATURES),1)
 
   ifeq ($(SUN_COMPILER),1)
@@ -365,7 +376,7 @@ ifeq ($(DETECT_FEATURES),1)
   endif
 
   ifeq ($(SUN_COMPILER),1)
-    LDFLAGS += $(SUN_LDFLAGS)
+    CRYPTOPP_LDFLAGS += $(SUN_LDFLAGS)
   endif
 
   ifeq ($(SSE2_FLAG),)
@@ -592,22 +603,21 @@ endif
 ifneq ($(IS_PPC32)$(IS_PPC64),00)
 ifeq ($(DETECT_FEATURES),1)
 
+  # XLC requires -qaltivec in addition to Arch or CPU option
   ifeq ($(XLC_COMPILER),1)
     POWER9_FLAG = -qarch=pwr9 -qaltivec
     POWER8_FLAG = -qarch=pwr8 -qaltivec
     POWER7_VSX_FLAG = -qarch=pwr7 -qvsx -qaltivec
     POWER7_PWR_FLAG = -qarch=pwr7 -qaltivec
-    POWER7_ALT_FLAG = -qaltivec
     POWER6_FLAG = -qarch=pwr6 -qaltivec
     POWER5_FLAG = -qarch=pwr5 -qaltivec
     POWER4_FLAG = -qarch=pwr4 -qaltivec
     ALTIVEC_FLAG = -qaltivec
   else
-    POWER9_FLAG = -mcpu=power9 -maltivec
-    POWER8_FLAG = -mcpu=power8 -maltivec
-    POWER7_VSX_FLAG = -mcpu=power7 -mvsx -maltivec
-    POWER7_PWR_FLAG = -mcpu=power7 -maltivec
-    POWER7_ALT_FLAG = -maltivec
+    POWER9_FLAG = -mcpu=power9
+    POWER8_FLAG = -mcpu=power8
+    POWER7_VSX_FLAG = -mcpu=power7 -mvsx
+    POWER7_PWR_FLAG = -mcpu=power7
     ALTIVEC_FLAG = -maltivec
   endif
 
@@ -649,8 +659,6 @@ ifeq ($(DETECT_FEATURES),1)
     SHA_FLAG = $(POWER8_FLAG)
     SHACAL2_FLAG = $(POWER8_FLAG)
     SIMECK_FLAG = $(POWER8_FLAG)
-    SIMON128_FLAG = $(POWER8_FLAG)
-    SPECK128_FLAG = $(POWER8_FLAG)
   else
     POWER8_FLAG =
   endif
@@ -673,22 +681,8 @@ ifeq ($(DETECT_FEATURES),1)
     ifeq ($(strip $(HAVE_OPT)),0)
       POWER7_FLAG = $(POWER7_PWR_FLAG)
 	else
-      TPROG = TestPrograms/test_ppc_power7.cxx
-      TOPT = $(POWER7_ALT_FLAG)
-      HAVE_OPT = $(shell $(CXX) $(TCXXFLAGS) $(ZOPT) $(TOPT) $(TPROG) -o $(TOUT) 2>&1 | tr ' ' '\n' | wc -l)
-      ifeq ($(strip $(HAVE_OPT)),0)
-        POWER7_FLAG = $(POWER7_ALT_FLAG)
-      else
-        POWER7_FLAG =
-      endif
+      POWER7_FLAG =
     endif
-  endif
-
-  ifneq ($(POWER7_FLAG),)
-    BLAKE2S_FLAG = $(POWER7_FLAG)
-    CHACHA_FLAG = $(POWER7_FLAG)
-    SIMON64_FLAG = $(POWER7_FLAG)
-    SPECK64_FLAG = $(POWER7_FLAG)
   endif
 
   #####################################################################
@@ -727,25 +721,22 @@ ifeq ($(DETECT_FEATURES),1)
     endif
   endif
 
+  ifneq ($(ALTIVEC_FLAG),)
+    BLAKE2S_FLAG = $(ALTIVEC_FLAG)
+    CHACHA_FLAG = $(ALTIVEC_FLAG)
+    SIMON64_FLAG = $(ALTIVEC_FLAG)
+    SPECK64_FLAG = $(ALTIVEC_FLAG)
+    SPECK128_FLAG = $(ALTIVEC_FLAG)
+    SIMON128_FLAG = $(ALTIVEC_FLAG)
+  endif
+
   #####################################################################
   # Fixups for algorithms that can drop to a lower ISA, if needed
 
   # Drop to Altivec if higher Power is not available
   ifneq ($(ALTIVEC_FLAG),)
-    ifeq ($(BLAKE2S_FLAG),)
-      BLAKE2S_FLAG = $(ALTIVEC_FLAG)
-    endif
-    ifeq ($(CHACHA_FLAG),)
-      CHACHA_FLAG = $(ALTIVEC_FLAG)
-    endif
     ifeq ($(GCM_FLAG),)
       GCM_FLAG = $(ALTIVEC_FLAG)
-    endif
-    ifeq ($(SIMON64_FLAG),)
-      SIMON64_FLAG = $(ALTIVEC_FLAG)
-    endif
-    ifeq ($(SPECK64_FLAG),)
-      SPECK64_FLAG = $(ALTIVEC_FLAG)
     endif
   endif
 
@@ -765,7 +756,7 @@ ifeq ($(DETECT_FEATURES),1)
 # DETECT_FEATURES
 endif
 
-# IBM XL C/C++ compiler
+# IBM XL C++ compiler
 ifeq ($(XLC_COMPILER),1)
   ifeq ($(findstring -qmaxmem,$(CXXFLAGS)),)
     CRYPTOPP_CXXFLAGS += -qmaxmem=-1
@@ -821,23 +812,39 @@ ifeq ($(SUN_COMPILER),1)
   CRYPTOPP_CXXFLAGS := $(subst -fpic,-KPIC,$(CRYPTOPP_CXXFLAGS))
 endif
 
-# Remove -fPIC if present. IBM XL C/C++ use -qpic
+# Remove -fPIC if present. IBM XL C++ uses -qpic
 ifeq ($(XLC_COMPILER),1)
   CRYPTOPP_CXXFLAGS := $(subst -fPIC,-qpic,$(CRYPTOPP_CXXFLAGS))
   CRYPTOPP_CXXFLAGS := $(subst -fpic,-qpic,$(CRYPTOPP_CXXFLAGS))
 endif
 
+# Disable IBM XL C++ "1500-036: (I) The NOSTRICT option (default at OPT(3))
+# has the potential to alter the semantics of a program."
+ifeq ($(XLC_COMPILER),1)
+  TPROG = TestPrograms/test_cxx.cxx
+  TOPT = -qsuppress=1500-036
+  HAVE_OPT = $(shell $(CXX) $(TCXXFLAGS) $(ZOPT) $(TOPT) $(TPROG) -o $(TOUT) 2>&1 | tr ' ' '\n' | wc -l)
+  ifeq ($(strip $(HAVE_OPT)),0)
+    CRYPTOPP_CXXFLAGS += -qsuppress=1500-036
+  endif  # -qsuppress
+endif  # IBM XL C++ compiler
+
 # Add -xregs=no%appl SPARC. SunCC should not use certain registers in library code.
 # https://docs.oracle.com/cd/E18659_01/html/821-1383/bkamt.html
-ifeq ($(IS_SUN)$(SUN_COMPILER),11)
-  ifneq ($(IS_SPARC32)$(IS_SPARC64),00)
+ifneq ($(IS_SPARC32)$(IS_SPARC64),00)
+  ifeq ($(SUN_COMPILER),1)
     ifeq ($(findstring -xregs=no%appl,$(CXXFLAGS)),)
       CRYPTOPP_CXXFLAGS += -xregs=no%appl
     endif  # -xregs
-  endif  # Sparc
-endif  # SunOS
+  endif  # SunCC
+  ifeq ($(GCC_COMPILER),1)
+    ifeq ($(findstring -mno-app-regs,$(CXXFLAGS)),)
+      CRYPTOPP_CXXFLAGS += -mno-app-regs
+    endif  # no-app-regs
+  endif  # GCC
+endif  # Sparc
 
-# Add -pipe for everything except IBM XL C/C++, SunCC and ARM.
+# Add -pipe for everything except IBM XL C++, SunCC and ARM.
 # Allow ARM-64 because they seems to have >1 GB of memory
 ifeq ($(XLC_COMPILER)$(SUN_COMPILER)$(IS_ARM32),000)
   ifeq ($(findstring -save-temps,$(CXXFLAGS)),)
@@ -851,20 +858,10 @@ endif
 ifeq ($(IS_SUN)$(SUN_COMPILER),11)
   ifneq ($(IS_X86)$(IS_X64),00)
     ifeq ($(findstring -DCRYPTOPP_DISABLE_ASM,$(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)),)
-      LDFLAGS += -M cryptopp.mapfile
+      CRYPTOPP_LDFLAGS += -M cryptopp.mapfile
     endif  # No CRYPTOPP_DISABLE_ASM
   endif  # X86/X32/X64
 endif  # SunOS
-
-# TODO: can we remove this since removing sockets?
-#ifneq ($(IS_MINGW),0)
-#  LDLIBS += -lws2_32
-#endif
-
-# TODO: can we remove this since removing sockets?
-#ifneq ($(IS_SUN),0)
-#  LDLIBS += -lnsl -lsocket
-#endif
 
 ifneq ($(IS_LINUX)$(IS_HURD),00)
   ifeq ($(findstring -fopenmp,$(CXXFLAGS)),-fopenmp)
@@ -967,7 +964,7 @@ ifeq ($(findstring ld.gold,$(LD)),ld.gold)
     LD_GOLD = $(shell command -v ld.gold)
     ELF_FORMAT := $(shell file $(LD_GOLD) 2>&1 | cut -d":" -f 2 | $(GREP) -i -c "elf")
     ifneq ($(ELF_FORMAT),0)
-      LDFLAGS += -fuse-ld=gold
+      CRYPTOPP_LDFLAGS += -fuse-ld=gold
     endif # ELF/ELF64
   endif # CXXFLAGS
 endif # Gold
@@ -1042,11 +1039,11 @@ ifeq ($(findstring lean,$(MAKECMDGOALS)),lean)
   endif # CRYPTOPP_CXXFLAGS
   ifneq ($(IS_DARWIN),0)
     ifeq ($(findstring -Wl,-dead_strip,$(LDFLAGS)),)
-      LDFLAGS += -Wl,-dead_strip
+      CRYPTOPP_LDFLAGS += -Wl,-dead_strip
     endif # CRYPTOPP_CXXFLAGS
   else # BSD, Linux and Unix
     ifeq ($(findstring -Wl,--gc-sections,$(LDFLAGS)),)
-      LDFLAGS += -Wl,--gc-sections
+      CRYPTOPP_LDFLAGS += -Wl,--gc-sections
     endif # LDFLAGS
   endif # MAKECMDGOALS
 endif # Dead code stripping
@@ -1158,6 +1155,18 @@ DLLOBJS := $(DLLOBJS:.S=.export.o)
 LIBIMPORTOBJS := $(LIBOBJS:.o=.import.o)
 TESTIMPORTOBJS := $(TESTOBJS:.o=.import.o)
 DLLTESTOBJS := dlltest.dllonly.o
+
+###########################################################
+#####           Add our flags to user flags           #####
+###########################################################
+
+# This ensures we don't add flags when the user forbids
+# use of customary library flags, like -fPIC. Make will
+# ignore this assignment when CXXFLAGS is passed as an
+# argument to the make program: make CXXFLAGS="..."
+CPPFLAGS := $(strip $(CRYPTOPP_CPPFLAGS) $(CPPFLAGS))
+CXXFLAGS := $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS))
+LDFLAGS  := $(strip $(CRYPTOPP_LDFLAGS) $(LDFLAGS))
 
 ###########################################################
 #####                Targets and Recipes              #####
@@ -1372,9 +1381,9 @@ endif
 
 libcryptopp.so$(SOLIB_VERSION_SUFFIX): $(LIBOBJS)
 ifeq ($(XLC_COMPILER),1)
-	$(CXX) -qmkshrobj $(SOLIB_FLAGS) -o $@ $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) $(LDFLAGS) $(LIBOBJS) $(LDLIBS)
+	$(CXX) -qmkshrobj $(SOLIB_FLAGS) -o $@ $(CXXFLAGS) $(LDFLAGS) $(LIBOBJS) $(LDLIBS)
 else
-	$(CXX) -shared $(SOLIB_FLAGS) -o $@ $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) $(LDFLAGS) $(LIBOBJS) $(LDLIBS)
+	$(CXX) -shared $(SOLIB_FLAGS) -o $@ $(CXXFLAGS) $(LDFLAGS) $(LIBOBJS) $(LDLIBS)
 endif
 ifeq ($(HAS_SOLIB_VERSION),1)
 	-$(LN) libcryptopp.so$(SOLIB_VERSION_SUFFIX) libcryptopp.so
@@ -1382,19 +1391,19 @@ ifeq ($(HAS_SOLIB_VERSION),1)
 endif
 
 libcryptopp.dylib: $(LIBOBJS)
-	$(CXX) -dynamiclib -o $@ $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) -install_name "$@" -current_version "$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)" -compatibility_version "$(LIB_MAJOR).$(LIB_MINOR)" -headerpad_max_install_names $(LDFLAGS) $(LIBOBJS)
+	$(CXX) -dynamiclib -o $@ $(CXXFLAGS) -install_name "$@" -current_version "$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)" -compatibility_version "$(LIB_MAJOR).$(LIB_MINOR)" -headerpad_max_install_names $(LDFLAGS) $(LIBOBJS)
 
 cryptest.exe: $(LINK_LIBRARY) $(TESTOBJS)
-	$(CXX) -o $@ $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) $(TESTOBJS) $(LINK_LIBRARY_PATH)$(LINK_LIBRARY) $(LDFLAGS) $(LDLIBS)
+	$(CXX) -o $@ $(CXXFLAGS) $(TESTOBJS) $(LINK_LIBRARY_PATH)$(LINK_LIBRARY) $(LDFLAGS) $(LDLIBS)
 
 # Makes it faster to test changes
 nolib: $(OBJS)
-	$(CXX) -o ct $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) $(OBJS) $(LDFLAGS) $(LDLIBS)
+	$(CXX) -o ct $(CXXFLAGS) $(OBJS) $(LDFLAGS) $(LDLIBS)
 
 dll: cryptest.import.exe dlltest.exe
 
 cryptopp.dll: $(DLLOBJS)
-	$(CXX) -shared -o $@ $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) $(DLLOBJS) $(LDFLAGS) $(LDLIBS) -Wl,--out-implib=libcryptopp.dll.a
+	$(CXX) -shared -o $@ $(CXXFLAGS) $(DLLOBJS) $(LDFLAGS) $(LDLIBS) -Wl,--out-implib=libcryptopp.dll.a
 
 libcryptopp.import.a: $(LIBIMPORTOBJS)
 	$(AR) $(ARFLAGS) $@ $(LIBIMPORTOBJS)
@@ -1403,10 +1412,10 @@ ifeq ($(IS_SUN),0)
 endif
 
 cryptest.import.exe: cryptopp.dll libcryptopp.import.a $(TESTIMPORTOBJS)
-	$(CXX) -o $@ $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) $(TESTIMPORTOBJS) -L. -lcryptopp.dll -lcryptopp.import $(LDFLAGS) $(LDLIBS)
+	$(CXX) -o $@ $(CXXFLAGS) $(TESTIMPORTOBJS) -L. -lcryptopp.dll -lcryptopp.import $(LDFLAGS) $(LDLIBS)
 
 dlltest.exe: cryptopp.dll $(DLLTESTOBJS)
-	$(CXX) -o $@ $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) $(DLLTESTOBJS) -L. -lcryptopp.dll $(LDFLAGS) $(LDLIBS)
+	$(CXX) -o $@ $(CXXFLAGS) $(DLLTESTOBJS) -L. -lcryptopp.dll $(LDFLAGS) $(LDLIBS)
 
 # Some users already have a libcryptopp.pc. We install it if the file
 # is present. If you want one, then issue 'make libcryptopp.pc'. Be sure
@@ -1414,9 +1423,10 @@ dlltest.exe: cryptopp.dll $(DLLTESTOBJS)
 libcryptopp.pc:
 	@echo '# Crypto++ package configuration file' > libcryptopp.pc
 	@echo '' >> libcryptopp.pc
-	@echo 'prefix=$(PREFIX)' >> libcryptopp.pc
-	@echo 'libdir=$(LIBDIR)' >> libcryptopp.pc
-	@echo 'includedir=$${prefix}/include' >> libcryptopp.pc
+	@echo 'prefix=$(PC_PREFIX)' >> libcryptopp.pc
+	@echo 'libdir=$(PC_LIBDIR)' >> libcryptopp.pc
+	@echo 'includedir=$(PC_INCLUDEDIR)' >> libcryptopp.pc
+	@echo 'datadir=$(PC_DATADIR)' >> libcryptopp.pc
 	@echo '' >> libcryptopp.pc
 	@echo 'Name: Crypto++' >> libcryptopp.pc
 	@echo 'Description: Crypto++ cryptographic library' >> libcryptopp.pc
@@ -1501,186 +1511,186 @@ endif # Dependencies
 
 # Cryptogams ARM asm implementation. AES needs -mthumb for Clang
 aes_armv4.o : aes_armv4.S
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_THUMB_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_THUMB_FLAG) -c) $<
 
 # SSSE3 or NEON available
 aria_simd.o : aria_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(ARIA_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(ARIA_FLAG) -c) $<
 
 # SSE, NEON or POWER7 available
 blake2s_simd.o : blake2s_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(BLAKE2S_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(BLAKE2S_FLAG) -c) $<
 
 # SSE, NEON or POWER8 available
 blake2b_simd.o : blake2b_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(BLAKE2B_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(BLAKE2B_FLAG) -c) $<
 
 # SSE2 or NEON available
 chacha_simd.o : chacha_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CHACHA_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CHACHA_FLAG) -c) $<
 
 # AVX2 available
 chacha_avx.o : chacha_avx.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CHACHA_AVX2_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CHACHA_AVX2_FLAG) -c) $<
 
 # SSSE3 available
 cham_simd.o : cham_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CHAM_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CHAM_FLAG) -c) $<
 
 # SSE4.2 or ARMv8a available
 crc_simd.o : crc_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CRC_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CRC_FLAG) -c) $<
 
 # Power9 available
 darn.o : darn.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(DARN_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(DARN_FLAG) -c) $<
 
 # SSE2 on i686
 donna_sse.o : donna_sse.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SSE2_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SSE2_FLAG) -c) $<
 
 # Carryless multiply
 gcm_simd.o : gcm_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(GCM_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(GCM_FLAG) -c) $<
 
 # Carryless multiply
 gf2n_simd.o : gf2n_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(GF2N_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(GF2N_FLAG) -c) $<
 
 # SSSE3 available
 keccak_simd.o : keccak_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(KECCAK_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(KECCAK_FLAG) -c) $<
 
 # SSSE3 available
 lea_simd.o : lea_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(LEA_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(LEA_FLAG) -c) $<
 
 # NEON available
 neon_simd.o : neon_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(NEON_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(NEON_FLAG) -c) $<
 
 # AltiVec available
 ppc_simd.o : ppc_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(ALTIVEC_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(ALTIVEC_FLAG) -c) $<
 
 # Power7 available
 ppc_power7.o : ppc_power7.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(POWER7_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(POWER7_FLAG) -c) $<
 
 # Power8 available
 ppc_power8.o : ppc_power8.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(POWER8_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(POWER8_FLAG) -c) $<
 
 # Power9 available
 ppc_power9.o : ppc_power9.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(POWER9_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(POWER9_FLAG) -c) $<
 
 # AESNI or ARMv7a/ARMv8a available
 rijndael_simd.o : rijndael_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(AES_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(AES_FLAG) -c) $<
 
 # SSE4.2/SHA-NI or ARMv8a available
 sha_simd.o : sha_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SHA_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SHA_FLAG) -c) $<
 
 # Cryptogams SHA1 asm implementation.
 sha1_armv4.o : sha1_armv4.S
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_FLAG) -c) $<
 
 # Cryptogams SHA256 asm implementation.
 sha256_armv4.o : sha256_armv4.S
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_FLAG) -c) $<
 
 # Cryptogams SHA512 asm implementation.
 sha512_armv4.o : sha512_armv4.S
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(CRYPTOGAMS_ARMV7_FLAG) -c) $<
 
 sha3_simd.o : sha3_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SHA3_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SHA3_FLAG) -c) $<
 
 # SSE4.2/SHA-NI or ARMv8a available
 shacal2_simd.o : shacal2_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SHA_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SHA_FLAG) -c) $<
 
 # SSSE3 or NEON available
 simeck_simd.o : simeck_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SIMECK_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SIMECK_FLAG) -c) $<
 
 # SSE4.1, NEON or POWER7 available
 simon64_simd.o : simon64_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SIMON64_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SIMON64_FLAG) -c) $<
 
 # SSSE3, NEON or POWER8 available
 simon128_simd.o : simon128_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SIMON128_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SIMON128_FLAG) -c) $<
 
 # SSE4.1, NEON or POWER7 available
 speck64_simd.o : speck64_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SPECK64_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SPECK64_FLAG) -c) $<
 
 # SSSE3, NEON or POWER8 available
 speck128_simd.o : speck128_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SPECK128_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SPECK128_FLAG) -c) $<
 
 # ARMv8.4 available
 sm3_simd.o : sm3_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SM3_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SM3_FLAG) -c) $<
 
 # AESNI available
 sm4_simd.o : sm4_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SM4_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SM4_FLAG) -c) $<
 
 # IBM XLC -O3 optimization bug
 ifeq ($(XLC_COMPILER),1)
 sm3.o : sm3.cpp
-	$(CXX) $(strip $(subst -O3,-O2,$(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) -c) $<
+	$(CXX) $(strip $(subst -O3,-O2,$(CXXFLAGS)) -c) $<
 donna_32.o : donna_32.cpp
-	$(CXX) $(strip $(subst -O3,-O2,$(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) -c) $<
+	$(CXX) $(strip $(subst -O3,-O2,$(CXXFLAGS)) -c) $<
 donna_64.o : donna_64.cpp
-	$(CXX) $(strip $(subst -O3,-O2,$(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) -c) $<
+	$(CXX) $(strip $(subst -O3,-O2,$(CXXFLAGS)) -c) $<
 endif
 
 # SSE2 on i686
 sse_simd.o : sse_simd.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(SSE2_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(SSE2_FLAG) -c) $<
 
 # Don't build Rijndael with UBsan. Too much noise due to unaligned data accesses.
-ifneq ($(findstring -fsanitize=undefined,$(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)),)
+ifneq ($(findstring -fsanitize=undefined,$(CXXFLAGS)),)
 rijndael.o : rijndael.cpp
-	$(CXX) $(strip $(subst -fsanitize=undefined,,$(CRYPTOPP_CXXFLAGS) $(CXXFLAGS)) -c) $<
+	$(CXX) $(strip $(subst -fsanitize=undefined,,$(CXXFLAGS)) -c) $<
 endif
 
 # Only use CRYPTOPP_DATA_DIR if its not set in CXXFLAGS
-ifeq ($(findstring -DCRYPTOPP_DATA_DIR, $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS))),)
+ifeq ($(findstring -DCRYPTOPP_DATA_DIR, $(CXXFLAGS)),)
 ifneq ($(strip $(CRYPTOPP_DATA_DIR)),)
 validat%.o : validat%.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
 bench%.o : bench%.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
 datatest.o : datatest.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
 test.o : test.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -DCRYPTOPP_DATA_DIR=\"$(CRYPTOPP_DATA_DIR)\" -c) $<
 endif
 endif
 
 validat1.o : validat1.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) $(ALTIVEC_FLAG) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) $(ALTIVEC_FLAG) -c) $<
 
 %.dllonly.o : %.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_DLL_ONLY -c) $< -o $@
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -DCRYPTOPP_DLL_ONLY -c) $< -o $@
 
 %.import.o : %.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_IMPORTS -c) $< -o $@
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -DCRYPTOPP_IMPORTS -c) $< -o $@
 
 %.export.o : %.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_EXPORTS -c) $< -o $@
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -DCRYPTOPP_EXPORTS -c) $< -o $@
 
 %.bc : %.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -c) $<
 
 %.o : %.cpp
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -c) $<
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS) -c) $<
 
 .PHONY: so_warning
 so_warning:
@@ -1693,4 +1703,4 @@ endif
 
 .PHONY: dep deps depend
 dep deps depend GNUmakefile.deps:
-	$(CXX) $(strip $(CRYPTOPP_CXXFLAGS) $(CXXFLAGS) -DCRYPTOPP_DISABLE_ASM) -MM *.cpp > GNUmakefile.deps
+	$(CXX) $(strip $(CPPFLAGS) $(CXXFLAGS)) -MM *.cpp > GNUmakefile.deps

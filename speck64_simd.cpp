@@ -12,7 +12,7 @@
 #include "misc.h"
 
 // Uncomment for benchmarking C++ against SSE or NEON.
-// Do so in both speck.cpp and speck-simd.cpp.
+// Do so in both speck.cpp and speck_simd.cpp.
 // #undef CRYPTOPP_SSE41_AVAILABLE
 // #undef CRYPTOPP_ARM_NEON_AVAILABLE
 
@@ -127,7 +127,7 @@ inline void SPECK64_Enc_Block(uint32x4_t &block0, uint32x4_t &block1,
     uint32x4_t x1 = vuzpq_u32(block0, block1).val[1];
     uint32x4_t y1 = vuzpq_u32(block0, block1).val[0];
 
-    for (int i=0; i < static_cast<int>(rounds); ++i)
+    for (size_t i=0; i < static_cast<size_t>(rounds); ++i)
     {
         const uint32x4_t rk = vdupq_n_u32(subkeys[i]);
 
@@ -178,7 +178,7 @@ inline void SPECK64_Enc_6_Blocks(uint32x4_t &block0, uint32x4_t &block1,
     uint32x4_t x3 = vuzpq_u32(block4, block5).val[1];
     uint32x4_t y3 = vuzpq_u32(block4, block5).val[0];
 
-    for (int i=0; i < static_cast<int>(rounds); ++i)
+    for (size_t i=0; i < static_cast<size_t>(rounds); ++i)
     {
         const uint32x4_t rk = vdupq_n_u32(subkeys[i]);
 
@@ -256,6 +256,13 @@ inline void SPECK64_Dec_6_Blocks(uint32x4_t &block0, uint32x4_t &block1,
 
 #if (CRYPTOPP_SSE41_AVAILABLE)
 
+#ifndef M128_CAST
+# define M128_CAST(x) ((__m128i *)(void *)(x))
+#endif
+#ifndef CONST_M128_CAST
+# define CONST_M128_CAST(x) ((const __m128i *)(const void *)(x))
+#endif
+
 template <unsigned int R>
 inline __m128i RotateLeft32(const __m128i& val)
 {
@@ -311,9 +318,10 @@ inline void SPECK64_Enc_Block(__m128i &block0, __m128i &block1,
     __m128i x1 = _mm_castps_si128(_mm_shuffle_ps(t0, t1, _MM_SHUFFLE(3,1,3,1)));
     __m128i y1 = _mm_castps_si128(_mm_shuffle_ps(t0, t1, _MM_SHUFFLE(2,0,2,0)));
 
-    for (int i=0; i < static_cast<int>(rounds); ++i)
+    for (size_t i=0; i < static_cast<size_t>(rounds); ++i)
     {
-        const __m128i rk = _mm_set1_epi32(subkeys[i]);
+        // Round keys are pre-splated in forward direction
+        const __m128i rk = _mm_load_si128(CONST_M128_CAST(subkeys+i*4));
 
         x1 = RotateRight32<8>(x1);
         x1 = _mm_add_epi32(x1, y1);
@@ -374,9 +382,10 @@ inline void SPECK64_Enc_6_Blocks(__m128i &block0, __m128i &block1,
     __m128i x3 = _mm_castps_si128(_mm_shuffle_ps(t4, t5, _MM_SHUFFLE(3,1,3,1)));
     __m128i y3 = _mm_castps_si128(_mm_shuffle_ps(t4, t5, _MM_SHUFFLE(2,0,2,0)));
 
-    for (int i=0; i < static_cast<int>(rounds); ++i)
+    for (size_t i=0; i < static_cast<size_t>(rounds); ++i)
     {
-        const __m128i rk = _mm_set1_epi32(subkeys[i]);
+        // Round keys are pre-splated in forward direction
+        const __m128i rk = _mm_load_si128(CONST_M128_CAST(subkeys+i*4));
 
         x1 = RotateRight32<8>(x1);
         x2 = RotateRight32<8>(x2);
@@ -468,6 +477,7 @@ using CryptoPP::VecAdd;
 using CryptoPP::VecSub;
 using CryptoPP::VecXor;
 using CryptoPP::VecLoad;
+using CryptoPP::VecLoadAligned;
 using CryptoPP::VecPermute;
 
 // Rotate left by bit count
@@ -501,10 +511,10 @@ void SPECK64_Enc_Block(uint32x4_p &block0, uint32x4_p &block1,
     uint32x4_p x1 = VecPermute(block0, block1, m1);
     uint32x4_p y1 = VecPermute(block0, block1, m2);
 
-    for (int i=0; i < static_cast<int>(rounds); ++i)
+    for (size_t i=0; i < static_cast<size_t>(rounds); ++i)
     {
         // Round keys are pre-splated in forward direction
-        const uint32x4_p rk = VecLoad(subkeys+i*4);
+        const uint32x4_p rk = VecLoadAligned(subkeys+i*4);
 
         x1 = RotateRight32<8>(x1);
         x1 = VecAdd(x1, y1);
@@ -544,7 +554,7 @@ void SPECK64_Dec_Block(uint32x4_p &block0, uint32x4_p &block1,
 
     for (int i = static_cast<int>(rounds-1); i >= 0; --i)
     {
-#if (CRYPTOPP_POWER7_AVAILABLE)
+#if defined(_ARCH_PWR7)
         const uint32x4_p rk = vec_splats(subkeys[i]);
 #else
         // subkeys has extra elements so memory backs the last subkey
@@ -594,10 +604,10 @@ void SPECK64_Enc_6_Blocks(uint32x4_p &block0, uint32x4_p &block1,
     uint32x4_p x3 = (uint32x4_p)VecPermute(block4, block5, m1);
     uint32x4_p y3 = (uint32x4_p)VecPermute(block4, block5, m2);
 
-    for (int i=0; i < static_cast<int>(rounds); ++i)
+    for (size_t i=0; i < static_cast<size_t>(rounds); ++i)
     {
         // Round keys are pre-splated in forward direction
-        const uint32x4_p rk = VecLoad(subkeys+i*4);
+        const uint32x4_p rk = VecLoadAligned(subkeys+i*4);
 
         x1 = RotateRight32<8>(x1);
         x2 = RotateRight32<8>(x2);
@@ -659,7 +669,7 @@ void SPECK64_Dec_6_Blocks(uint32x4_p &block0, uint32x4_p &block1,
 
     for (int i = static_cast<int>(rounds-1); i >= 0; --i)
     {
-#if (CRYPTOPP_POWER7_AVAILABLE)
+#if defined(_ARCH_PWR7)
         const uint32x4_p rk = vec_splats(subkeys[i]);
 #else
         // subkeys has extra elements so memory backs the last subkey
@@ -752,21 +762,7 @@ size_t SPECK64_Dec_AdvancedProcessBlocks_SSE41(const word32* subKeys, size_t rou
 
 // ***************************** Altivec ***************************** //
 
-#if (CRYPTOPP_POWER7_AVAILABLE)
-size_t SPECK64_Enc_AdvancedProcessBlocks_POWER7(const word32* subKeys, size_t rounds,
-    const byte *inBlocks, const byte *xorBlocks, byte *outBlocks, size_t length, word32 flags)
-{
-    return AdvancedProcessBlocks64_6x2_ALTIVEC(SPECK64_Enc_Block, SPECK64_Enc_6_Blocks,
-        subKeys, rounds, inBlocks, xorBlocks, outBlocks, length, flags);
-}
-
-size_t SPECK64_Dec_AdvancedProcessBlocks_POWER7(const word32* subKeys, size_t rounds,
-    const byte *inBlocks, const byte *xorBlocks, byte *outBlocks, size_t length, word32 flags)
-{
-    return AdvancedProcessBlocks64_6x2_ALTIVEC(SPECK64_Dec_Block, SPECK64_Dec_6_Blocks,
-        subKeys, rounds, inBlocks, xorBlocks, outBlocks, length, flags);
-}
-#elif (CRYPTOPP_ALTIVEC_AVAILABLE)
+#if (CRYPTOPP_ALTIVEC_AVAILABLE)
 size_t SPECK64_Enc_AdvancedProcessBlocks_ALTIVEC(const word32* subKeys, size_t rounds,
     const byte *inBlocks, const byte *xorBlocks, byte *outBlocks, size_t length, word32 flags)
 {

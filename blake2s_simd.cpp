@@ -1,4 +1,4 @@
-// blake2-simd.cpp - written and placed in the public domain by
+// blake2_simd.cpp - written and placed in the public domain by
 //                   Samuel Neves, Jeffrey Walton, Uri Blumenthal
 //                   and Marcel Raad.
 //
@@ -8,10 +8,10 @@
 //    appropriate instructions sets in some build configurations.
 
 // The BLAKE2b and BLAKE2s numbers are consistent with the BLAKE2 team's
-// numbers. However, we have an Altivec/POWER7 implementation of BLAKE2s,
-// and a POWER7 implementation of BLAKE2b (BLAKE2 is missing them). The
-// Altivec/POWER7 code is about 2x faster than C++ when using GCC 5.0 or
-// above. The POWER7 code is about 2.5x faster than C++ when using GCC 5.0
+// numbers. However, we have an Altivec implementation of BLAKE2s,
+// and a POWER8 implementation of BLAKE2b (BLAKE2 team is missing them).
+// Altivec code is about 2x faster than C++ when using GCC 5.0 or
+// above. The POWER8 code is about 2.5x faster than C++ when using GCC 5.0
 // or above. If you use GCC 4.0 (PowerMac) or GCC 4.8 (GCC Compile Farm)
 // then the PowerPC code will be slower than C++. Be sure to use GCC 5.0
 // or above for PowerPC builds or disable Altivec for BLAKE2b and BLAKE2s
@@ -23,7 +23,7 @@
 #include "blake2.h"
 
 // Uncomment for benchmarking C++ against SSE2 or NEON.
-// Do so in both blake2.cpp and blake2-simd.cpp.
+// Do so in both blake2.cpp and blake2_simd.cpp.
 // #undef CRYPTOPP_SSE41_AVAILABLE
 // #undef CRYPTOPP_ARM_NEON_AVAILABLE
 // #undef CRYPTOPP_ALTIVEC_AVAILABLE
@@ -66,6 +66,11 @@
 
 #if (CRYPTOPP_ALTIVEC_AVAILABLE)
 # include "ppc_simd.h"
+#endif
+
+#if defined(CRYPTOPP_GCC_DIAGNOSTIC_AVAILABLE)
+/* Ignore "warning: vec_lvsl is deprecated..." */
+# pragma GCC diagnostic ignored "-Wdeprecated"
 #endif
 
 // Squash MS LNK4221 and libtool warnings
@@ -697,36 +702,41 @@ void BLAKE2_Compress32_NEON(const byte* input, BLAKE2s_State& state)
 }
 #endif  // CRYPTOPP_ARM_NEON_AVAILABLE
 
-#if (CRYPTOPP_POWER7_AVAILABLE || CRYPTOPP_ALTIVEC_AVAILABLE)
+#if (CRYPTOPP_ALTIVEC_AVAILABLE)
 
-inline uint32x4_p VecLoad32(const void* p)
+template <class T>
+inline uint32x4_p VecLoad32(const T* p)
 {
-    return VecLoad((const word32*)p);
+    return VecLoad(p);
 }
 
-inline uint32x4_p VecLoad32LE(const void* p)
+template <class T>
+inline uint32x4_p VecLoad32LE(const T* p, const uint8x16_p le_mask)
 {
-#if __BIG_ENDIAN__
-    const uint8x16_p m = {3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12};
-    const uint32x4_p v = VecLoad((const word32*)p);
-    return VecPermute(v, v, m);
+#if defined(CRYPTOPP_BIG_ENDIAN)
+    const uint32x4_p v = VecLoad(p);
+    return VecPermute(v, v, le_mask);
 #else
-    return VecLoad((const word32*)p);
+    CRYPTOPP_UNUSED(le_mask);
+    return VecLoad(p);
 #endif
 }
 
-inline void VecStore32(void* p, const uint32x4_p x)
+template <class T>
+inline void VecStore32(T* p, const uint32x4_p x)
 {
-    VecStore(x, (word32*)p);
+    VecStore(x, p);
 }
 
-inline void VecStore32LE(void* p, const uint32x4_p x)
+template <class T>
+inline void VecStore32LE(T* p, const uint32x4_p x, const uint8x16_p le_mask)
 {
-#if __BIG_ENDIAN__
-    const uint8x16_p m = {3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12};
-    VecStore(VecPermute(x, x, m), (word32*)p);
+#if defined(CRYPTOPP_BIG_ENDIAN)
+    const uint32x4_p v = VecPermute(x, x, le_mask);
+    VecStore(v, p);
 #else
-    VecStore(x, (word32*)p);
+    CRYPTOPP_UNUSED(le_mask);
+    VecStore(x, p);
 #endif
 }
 
@@ -868,12 +878,7 @@ uint32x4_p VectorSet32<3,1,3,1>(const uint32x4_p a, const uint32x4_p b,
     return VecPermute(a, c, mask);
 }
 
-// BLAKE2_Compress32_CORE will use either POWER7 or ALTIVEC,
-// depending on the flags used to compile this source file. The
-// abstractions are handled in VecLoad, VecStore and friends. In
-// the future we may provide both POWER7 or ALTIVEC at the same
-// time to better support distros.
-void BLAKE2_Compress32_CORE(const byte* input, BLAKE2s_State& state)
+void BLAKE2_Compress32_ALTIVEC(const byte* input, BLAKE2s_State& state)
 {
     # define m1 m0
     # define m2 m0
@@ -992,17 +997,71 @@ void BLAKE2_Compress32_CORE(const byte* input, BLAKE2s_State& state)
       BLAKE2S_G2(row1,row2,row3,row4,buf4); \
       BLAKE2S_UNDIAGONALIZE(row1,row2,row3,row4);
 
+    // Possibly unaligned user messages
+    uint32x4_p m0, m4, m8, m12;
+    // Endian conversion mask
+    const uint8x16_p le_mask = {3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12};
+
+#if defined(_ARCH_PWR9)
+    // POWER9 provides loads for char's and short's
+    m0 = (uint32x4_p) vec_xl(  0, CONST_V8_CAST( input ));
+    m4 = (uint32x4_p) vec_xl( 16, CONST_V8_CAST( input ));
+    m8 = (uint32x4_p) vec_xl( 32, CONST_V8_CAST( input ));
+    m12 = (uint32x4_p) vec_xl( 48, CONST_V8_CAST( input ));
+
+# if defined(CRYPTOPP_BIG_ENDIAN)
+    m0 = vec_perm(m0, m0, le_mask);
+    m4 = vec_perm(m4, m4, le_mask);
+    m8 = vec_perm(m8, m8, le_mask);
+    m12 = vec_perm(m12, m12, le_mask);
+# endif
+#else
+    // Altivec only provides 16-byte aligned loads
+    // http://www.nxp.com/docs/en/reference-manual/ALTIVECPEM.pdf
+    m0 = (uint32x4_p) vec_ld(  0, CONST_V8_CAST( input ));
+    m4 = (uint32x4_p) vec_ld( 16, CONST_V8_CAST( input ));
+    m8 = (uint32x4_p) vec_ld( 32, CONST_V8_CAST( input ));
+    m12 = (uint32x4_p) vec_ld( 48, CONST_V8_CAST( input ));
+
+    // Alignment check for load of the message buffer
+    const uintptr_t addr = (uintptr_t)input;
+    if (addr%16 == 0)
+    {
+        // Already aligned. Perform a little-endian swap as required
+# if defined(CRYPTOPP_BIG_ENDIAN)
+        m0 = vec_perm(m0, m0, le_mask);
+        m4 = vec_perm(m4, m4, le_mask);
+        m8 = vec_perm(m8, m8, le_mask);
+        m12 = vec_perm(m12, m12, le_mask);
+# endif
+    }
+    else
+    {
+        // Not aligned. Fix vectors and perform a little-endian swap as required
+        // http://mirror.informatimago.com/next/developer.apple.com/
+        //        hardwaredrivers/ve/code_optimization.html
+        uint32x4_p ex; uint8x16_p perm;
+        ex = (uint32x4_p) vec_ld(48+15, CONST_V8_CAST( input ));
+        perm = vec_lvsl(0, CONST_V8_CAST( addr ));
+
+# if defined(CRYPTOPP_BIG_ENDIAN)
+        // Combine the vector permute with the little-endian swap
+        perm = vec_perm(perm, perm, le_mask);
+# endif
+
+        m0 = vec_perm(m0, m4, perm);
+        m4 = vec_perm(m4, m8, perm);
+        m8 = vec_perm(m8, m12, perm);
+        m12 = vec_perm(m12, ex, perm);
+    }
+#endif
+
     uint32x4_p row1, row2, row3, row4;
     uint32x4_p buf1, buf2, buf3, buf4;
     uint32x4_p  ff0,  ff1;
 
-    const uint32x4_p  m0 = VecLoad32LE(input +  0);
-    const uint32x4_p  m4 = VecLoad32LE(input + 16);
-    const uint32x4_p  m8 = VecLoad32LE(input + 32);
-    const uint32x4_p m12 = VecLoad32LE(input + 48);
-
-    row1 = ff0 = VecLoad32LE(state.h()+0);
-    row2 = ff1 = VecLoad32LE(state.h()+4);
+    row1 = ff0 = VecLoad32LE(state.h()+0, le_mask);
+    row2 = ff1 = VecLoad32LE(state.h()+4, le_mask);
     row3 = VecLoad32(BLAKE2S_IV+0);
     row4 = VecXor(VecLoad32(BLAKE2S_IV+4), VecLoad32(state.t()+0));
 
@@ -1017,25 +1076,9 @@ void BLAKE2_Compress32_CORE(const byte* input, BLAKE2s_State& state)
     BLAKE2S_ROUND(8);
     BLAKE2S_ROUND(9);
 
-    VecStore32LE(state.h()+0, VecXor(ff0, VecXor(row1, row3)));
-    VecStore32LE(state.h()+4, VecXor(ff1, VecXor(row2, row4)));
+    VecStore32LE(state.h()+0, VecXor(ff0, VecXor(row1, row3)), le_mask);
+    VecStore32LE(state.h()+4, VecXor(ff1, VecXor(row2, row4)), le_mask);
 }
-#endif  // CRYPTOPP_POWER7_AVAILABLE || CRYPTOPP_ALTIVEC_AVAILABLE
-
-#if (CRYPTOPP_POWER7_AVAILABLE)
-
-void BLAKE2_Compress32_POWER7(const byte* input, BLAKE2s_State& state)
-{
-    BLAKE2_Compress32_CORE(input, state);
-}
-
-#elif (CRYPTOPP_ALTIVEC_AVAILABLE)
-
-void BLAKE2_Compress32_ALTIVEC(const byte* input, BLAKE2s_State& state)
-{
-    BLAKE2_Compress32_CORE(input, state);
-}
-
-#endif
+#endif  // CRYPTOPP_ALTIVEC_AVAILABLE
 
 NAMESPACE_END
