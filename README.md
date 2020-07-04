@@ -1,4 +1,4 @@
-This fork was created for use with amrayn/licensepp
+This fork was created for use with amrayn/licensepp and Bazel.
 
 WORKSPACE
 
@@ -160,3 +160,10 @@ cc_library(
   visibility = ["//visibility:public"],
 )
 ```
+
+Building the license manager executable:
+
+```
+bazel build -s //third_party/licensepp:license-manager
+```
+
